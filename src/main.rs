@@ -1,9 +1,12 @@
 use indicatif::ProgressIterator;
+use std::ffi::OsStr;
 use std::fs;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::ffi::OsStr;
 
 #[derive(Debug)]
 struct Experiment {
@@ -25,9 +28,13 @@ impl Experiment {
 }
 
 fn main() {
-    let _initial = cargo_build().unwrap();
     let mut results = Vec::new();
     process_dir(&mut results, Path::new("src"));
+
+    let _initial = cargo_build().unwrap();
+    let first = &results[0].path;
+    std::fs::write(first, std::fs::read(first).unwrap()).unwrap();
+    let baseline = cargo_build().unwrap();
 
     for experiment in results.iter_mut().progress() {
         experiment.run(|e| e.time = cargo_build());
@@ -39,6 +46,13 @@ fn main() {
     last.run(|_| {
         Command::new("git").arg("diff").status().unwrap();
     });
+
+    let baseline = baseline as f64;
+    let mut output = BufWriter::new(File::create("results.txt").unwrap());
+    for result in results.iter().filter(|e| e.time.is_some()) {
+        let normalized = result.time.unwrap() as f64 / baseline;
+        writeln!(output, "{}", normalized).unwrap();
+    }
 }
 
 fn process_dir(results: &mut Vec<Experiment>, dir: &Path) {
@@ -55,7 +69,7 @@ fn process_dir(results: &mut Vec<Experiment>, dir: &Path) {
 }
 
 fn make_experiments(path: &Path) -> Vec<Experiment> {
-    let re = regex::Regex::new(r#" fn .*?\{"#).unwrap();
+    let re = regex::Regex::new(r#"\s*fn .*?\{"#).unwrap();
     let mut results = Vec::new();
     let contents = fs::read_to_string(path).unwrap();
     for m in re.find_iter(&contents) {
@@ -65,26 +79,23 @@ fn make_experiments(path: &Path) -> Vec<Experiment> {
             time: None,
         });
     }
-    /*
-    for i in 0..contents.len() - 1 {
-        if contents.get(i..i + 2) == Some("{\n") {
-            results.push(Experiment {
-                path: PathBuf::from(path),
-                offset: i,
-                time: None,
-            });
-        }
-    }
-    */
     results
 }
 
 fn cargo_build() -> Option<u64> {
+    let file = tempfile::NamedTempFile::new().unwrap();
     let output = Command::new("perf")
-        .args(["stat", "-einstructions", "-o/tmp/time", "cargo", "build"])
+        .args([
+            "stat",
+            "-einstructions",
+            "-o",
+            file.path().to_str().unwrap(),
+            "cargo",
+            "build",
+        ])
         .output()
         .unwrap();
-    let time = std::fs::read_to_string("/tmp/time")
+    let time = std::fs::read_to_string(file.path())
         .unwrap()
         .lines()
         .nth(5)
